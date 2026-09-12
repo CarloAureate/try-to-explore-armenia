@@ -196,7 +196,7 @@ def create_link():
 
     minutes = LINK_MINUTES[link_type]
 
-    token = secrets.token_urlsafe(32)
+    token = secrets.token_hex(2)
 
     created = now_utc()
     expires = created + timedelta(minutes=minutes)
