@@ -1,430 +1,775 @@
-import os, secrets, sqlite3
+import os
+import secrets
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from functools import wraps
-from flask import Flask, request, jsonify, render_template, redirect, url_for, session, abort
+
+from flask import (
+    Flask,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    session,
+    url_for,
+)
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
-DB = os.environ.get("DATABASE_PATH", "app.db")
-LINK_MINUTES = {"3m": 3, "3h": 180}
 
-def now():
+app.secret_key = os.environ.get(
+    "FLASK_SECRET_KEY",
+    "change-this-secret-key"
+)
+
+DATABASE = "app.db"
+
+LINK_MINUTES = {
+    "3m": 3,
+    "3h": 180,
+}
+
+LIVE_MINUTES = 30
+
+
+# =========================
+# DATABASE
+# =========================
+
+def now_utc():
     return datetime.now(timezone.utc)
 
-def iso(dt):
-    return dt.isoformat()
+
+def now_iso():
+    return now_utc().isoformat()
+
+
+def parse_time(value):
+    if not value:
+        return None
+
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
 
 def db():
-    con = sqlite3.connect(DB)
-    con.row_factory = sqlite3.Row
-    return con
+    conn = sqlite3.connect(DATABASE)
+    conn.row_factory = sqlite3.Row
+    return conn
+
 
 def init_db():
-    con = db()
-    con.executescript("""
-    CREATE TABLE IF NOT EXISTS links (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      token TEXT UNIQUE NOT NULL,
-      link_type TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      expires_at TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'ACTIVE',
-      selected_option TEXT,
-      used_at TEXT
-    );
-    CREATE TABLE IF NOT EXISTS location_shares (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      link_id INTEGER NOT NULL,
-      latitude REAL NOT NULL,
-      longitude REAL NOT NULL,
-      accuracy REAL,
-      location_timestamp TEXT NOT NULL,
-      received_at TEXT NOT NULL,
-      FOREIGN KEY(link_id) REFERENCES links(id)
-    );
+    conn = db()
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token TEXT UNIQUE NOT NULL,
+            duration TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ACTIVE',
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            used_at TEXT,
+            selected_option TEXT
+        )
     """)
-    con.commit(); con.close()
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS location_shares (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            link_id INTEGER UNIQUE NOT NULL,
+            latitude REAL NOT NULL,
+            longitude REAL NOT NULL,
+            accuracy REAL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(link_id) REFERENCES links(id)
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
 
 def refresh_expired():
-    con = db()
-    con.execute("UPDATE links SET status='EXPIRED' WHERE status='ACTIVE' AND expires_at <= ?", (iso(now()),))
-    con.commit(); con.close()
+    conn = db()
+    current = now_utc()
 
-def admin_required(fn):
-    @wraps(fn)
+    rows = conn.execute("""
+        SELECT id, status, expires_at, used_at
+        FROM links
+        WHERE status IN ('ACTIVE', 'LIVE')
+    """).fetchall()
+
+    for row in rows:
+        expires = parse_time(row["expires_at"])
+
+        if expires and expires <= current:
+            conn.execute("""
+                UPDATE links
+                SET status = 'EXPIRED'
+                WHERE id = ?
+            """, (row["id"],))
+            continue
+
+        if row["status"] == "LIVE" and row["used_at"]:
+            started = parse_time(row["used_at"])
+
+            if started and started + timedelta(minutes=LIVE_MINUTES) <= current:
+                conn.execute("""
+                    UPDATE links
+                    SET status = 'LOCATION_RECEIVED'
+                    WHERE id = ?
+                """, (row["id"],))
+
+    conn.commit()
+    conn.close()
+
+
+init_db()
+
+
+# =========================
+# ADMIN AUTH
+# =========================
+
+def admin_required(function):
+    @wraps(function)
     def wrapper(*args, **kwargs):
-        if not session.get("admin"):
-            return redirect(url_for("login", next=request.path))
-        return fn(*args, **kwargs)
+        if not session.get("admin_logged_in"):
+            return redirect(url_for("login"))
+        return function(*args, **kwargs)
+
     return wrapper
 
-@app.after_request
-def headers(resp):
-    resp.headers["X-Content-Type-Options"] = "nosniff"
-    resp.headers["X-Frame-Options"] = "DENY"
-    resp.headers["Referrer-Policy"] = "same-origin"
-    resp.headers["Permissions-Policy"] = "geolocation=(self)"
-    return resp
 
-@app.route("/")
+# =========================
+# SECURITY HEADERS
+# =========================
+
+@app.after_request
+def security_headers(response):
+    response.headers["Permissions-Policy"] = "geolocation=(self)"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    return response
+
+
+# =========================
+# MAIN
+# =========================
+
+@app.get("/")
 def home():
     return redirect(url_for("login"))
 
-@app.route("/login", methods=["GET","POST"])
+
+# =========================
+# LOGIN
+# =========================
+
+@app.route("/login", methods=["GET", "POST"])
 def login():
+
     error = None
+
     if request.method == "POST":
-        user = request.form.get("username","")
-        pw = request.form.get("password","")
-        if secrets.compare_digest(user, os.environ.get("ADMIN_USERNAME","admin")) and secrets.compare_digest(pw, os.environ.get("ADMIN_PASSWORD","")):
-            session.clear(); session["admin"] = True
+
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+
+        correct_username = os.environ.get("ADMIN_USERNAME", "admin")
+        correct_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+
+        if username == correct_username and password == correct_password:
+            session.clear()
+            session["admin_logged_in"] = True
+
             return redirect(url_for("admin"))
-        error = "Access denied. Check the admin credentials and try again."
+
+        error = "Invalid username or password"
+
     return render_template("login.html", error=error)
+
+
+@app.get("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+# =========================
+# ADMIN PAGE
+# =========================
+
 @app.get("/admin")
 @admin_required
 def admin():
     return render_template("admin.html")
 
 
+# =========================
+# CREATE LINK
+# =========================
+
+@app.post("/api/links")
+@admin_required
+def create_link():
+
+    refresh_expired()
+
+    data = request.get_json(silent=True) or {}
+
+    duration = data.get("duration")
+
+    if duration not in LINK_MINUTES:
+        return jsonify({
+            "success": False,
+            "error": "Invalid duration"
+        }), 400
+
+    minutes = LINK_MINUTES[duration]
+
+    token = secrets.token_urlsafe(32)
+
+    created = now_utc()
+    expires = created + timedelta(minutes=minutes)
+
+    conn = db()
+
+    conn.execute("""
+        INSERT INTO links (
+            token,
+            duration,
+            status,
+            created_at,
+            expires_at
+        )
+        VALUES (?, ?, 'ACTIVE', ?, ?)
+    """, (
+        token,
+        duration,
+        created.isoformat(),
+        expires.isoformat()
+    ))
+
+    conn.commit()
+    conn.close()
+
+    base_url = request.host_url.rstrip("/")
+    link = f"{base_url}/r/{token}"
+
+    return jsonify({
+        "success": True,
+        "token": token,
+        "url": link,
+        "link": link,
+        "duration": duration,
+        "expires_at": expires.isoformat(),
+        "status": "ACTIVE"
+    })
+
+
+# =========================
+# ADMIN LINKS
+# =========================
+
+@app.get("/api/links")
+@admin_required
+def list_links():
+
+    refresh_expired()
+
+    conn = db()
+
+    rows = conn.execute("""
+        SELECT
+            l.id,
+            l.token,
+            l.duration,
+            l.status,
+            l.created_at,
+            l.expires_at,
+            l.used_at,
+            l.selected_option,
+            ls.latitude,
+            ls.longitude,
+            ls.accuracy,
+            ls.updated_at
+        FROM links l
+        LEFT JOIN location_shares ls
+            ON ls.link_id = l.id
+        ORDER BY l.id DESC
+    """).fetchall()
+
+    conn.close()
+
+    base_url = request.host_url.rstrip("/")
+
+    result = []
+
+    for row in rows:
+
+        item = {
+            "id": row["id"],
+            "token": row["token"],
+            "duration": row["duration"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "expires_at": row["expires_at"],
+            "used_at": row["used_at"],
+            "selected_option": row["selected_option"],
+            "url": f"{base_url}/r/{row['token']}",
+            "latitude": row["latitude"],
+            "longitude": row["longitude"],
+            "accuracy": row["accuracy"],
+            "updated_at": row["updated_at"],
+        }
+
+        result.append(item)
+
+    return jsonify(result)
+
+
+# =========================
+# ADMIN STATS
+# =========================
+
+@app.get("/api/stats")
+@admin_required
+def stats():
+
+    refresh_expired()
+
+    conn = db()
+
+    total = conn.execute("""
+        SELECT COUNT(*) FROM links
+    """).fetchone()[0]
+
+    active = conn.execute("""
+        SELECT COUNT(*) FROM links
+        WHERE status = 'ACTIVE'
+    """).fetchone()[0]
+
+    live = conn.execute("""
+        SELECT COUNT(*) FROM links
+        WHERE status = 'LIVE'
+    """).fetchone()[0]
+
+    received = conn.execute("""
+        SELECT COUNT(*) FROM links
+        WHERE status IN ('LIVE', 'LOCATION_RECEIVED')
+    """).fetchone()[0]
+
+    declined = conn.execute("""
+        SELECT COUNT(*) FROM links
+        WHERE status = 'DECLINED'
+    """).fetchone()[0]
+
+    expired = conn.execute("""
+        SELECT COUNT(*) FROM links
+        WHERE status = 'EXPIRED'
+    """).fetchone()[0]
+
+    conn.close()
+
+    return jsonify({
+        "total": total,
+        "active": active,
+        "live": live,
+        "received": received,
+        "declined": declined,
+        "expired": expired
+    })
+
+
+# =========================
+# RECIPIENT PAGE
+# =========================
+
+@app.get("/r/<token>")
+def recipient(token):
+
+    refresh_expired()
+
+    conn = db()
+
+    link = conn.execute("""
+        SELECT *
+        FROM links
+        WHERE token = ?
+    """, (token,)).fetchone()
+
+    conn.close()
+
+    if not link:
+        return render_template(
+            "expired.html",
+            message="This link does not exist."
+        ), 404
+
+    expires = parse_time(link["expires_at"])
+
+    if expires and expires <= now_utc():
+        return render_template(
+            "expired.html",
+            message="This link has expired."
+        ), 410
+
+    if link["status"] != "ACTIVE":
+        return render_template(
+            "expired.html",
+            message="This link has already been used."
+        ), 410
+
+    return render_template(
+        "recipient.html",
+        token=token
+    )
+
+
+# =========================
+# FIRST RESPONSE
+# =========================
+
+@app.post("/api/r/<token>/respond")
+def respond(token):
+
+    refresh_expired()
+
     data = request.get_json(silent=True) or {}
 
     choice = data.get("choice")
 
-    if choice not in ("armenia", "yerevan", "declined"):
-        return jsonify(error="Invalid choice"), 400
+    if choice not in ("armenia", "yerevan", "decline"):
+        return jsonify({
+            "success": False,
+            "error": "Invalid choice"
+        }), 400
 
-    con = db()
+    conn = db()
 
-    row = con.execute(
-        "SELECT * FROM links WHERE token=?",
-        (token,)
-    ).fetchone()
+    link = conn.execute("""
+        SELECT *
+        FROM links
+        WHERE token = ?
+    """, (token,)).fetchone()
 
-    if not row:
-        con.close()
-        return jsonify(error="Invalid link"), 404
+    if not link:
+        conn.close()
 
-    if row["status"] != "ACTIVE":
-        con.close()
-        return jsonify(
-            error="Link expired or already used"
-        ), 410
+        return jsonify({
+            "success": False,
+            "error": "Link not found"
+        }), 404
 
-    if datetime.fromisoformat(row["expires_at"]) <= now():
-        con.execute(
-            "UPDATE links SET status='EXPIRED' WHERE id=?",
-            (row["id"],)
-        )
-        con.commit()
-        con.close()
+    if link["status"] != "ACTIVE":
+        conn.close()
 
-        return jsonify(error="Link expired"), 410
+        return jsonify({
+            "success": False,
+            "error": "This link has already been used"
+        }), 409
 
-    # Մերժում
-    if choice == "declined":
+    expires = parse_time(link["expires_at"])
 
-        con.execute(
-            """
+    if expires and expires <= now_utc():
+
+        conn.execute("""
             UPDATE links
-            SET status='DECLINED',
-                selected_option=?,
-                used_at=?
-            WHERE id=? AND status='ACTIVE'
-            """,
-            (
-                choice,
-                iso(now()),
-                row["id"]
-            )
-        )
+            SET status = 'EXPIRED'
+            WHERE id = ?
+        """, (link["id"],))
 
-        con.commit()
-        con.close()
+        conn.commit()
+        conn.close()
 
-        return jsonify(
-            ok=True,
-            status="DECLINED",
-            video=None
-        )
+        return jsonify({
+            "success": False,
+            "error": "Link expired"
+        }), 410
 
-    # Առաջին location
-    lat = data.get("latitude")
-    lon = data.get("longitude")
-    acc = data.get("accuracy")
+    # =====================
+    # DECLINE
+    # =====================
 
-    if not isinstance(lat, (int, float)) or \
-       not isinstance(lon, (int, float)):
+    if choice == "decline":
 
-        con.close()
+        conn.execute("""
+            UPDATE links
+            SET
+                status = 'DECLINED',
+                selected_option = 'decline',
+                used_at = ?
+            WHERE id = ?
+        """, (
+            now_iso(),
+            link["id"]
+        ))
 
-        return jsonify(
-            error="A real location was not received."
-        ), 422
+        conn.commit()
+        conn.close()
 
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return jsonify({
+            "success": True,
+            "status": "DECLINED"
+        })
 
-        con.close()
+    # =====================
+    # LOCATION REQUIRED
+    # =====================
 
-        return jsonify(
-            error="Invalid coordinates"
-        ), 400
+    try:
+        latitude = float(data.get("latitude"))
+        longitude = float(data.get("longitude"))
 
-    started = now()
+        accuracy_value = data.get("accuracy")
+        accuracy = float(accuracy_value) if accuracy_value is not None else None
 
-    # LIVE կարգավիճակ
-    cur = con.execute(
-        """
+    except (TypeError, ValueError):
+
+        conn.close()
+
+        return jsonify({
+            "success": False,
+            "error": "Valid location is required"
+        }), 400
+
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+
+        conn.close()
+
+        return jsonify({
+            "success": False,
+            "error": "Invalid coordinates"
+        }), 400
+
+    started = now_utc().isoformat()
+
+    conn.execute("""
         UPDATE links
-        SET status='LIVE',
-            selected_option=?,
-            used_at=?
-        WHERE id=? AND status='ACTIVE'
-        """,
-        (
-            choice,
-            iso(started),
-            row["id"]
-        )
-    )
+        SET
+            status = 'LIVE',
+            selected_option = ?,
+            used_at = ?
+        WHERE id = ?
+    """, (
+        choice,
+        started,
+        link["id"]
+    ))
 
-    if cur.rowcount != 1:
-
-        con.rollback()
-        con.close()
-
-        return jsonify(
-            error="Link already completed"
-        ), 409
-
-    con.execute(
-        """
-        INSERT INTO location_shares
-        (
+    # One location row per link.
+    # It will be updated during live tracking.
+    conn.execute("""
+        INSERT INTO location_shares (
             link_id,
             latitude,
             longitude,
             accuracy,
-            location_timestamp,
-            received_at
+            updated_at
         )
-        VALUES(?,?,?,?,?,?)
-        """,
-        (
-            row["id"],
-            lat,
-            lon,
-            acc if isinstance(acc, (int, float)) else None,
-            data.get("location_timestamp") or iso(started),
-            iso(started)
-        )
-    )
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(link_id)
+        DO UPDATE SET
+            latitude = excluded.latitude,
+            longitude = excluded.longitude,
+            accuracy = excluded.accuracy,
+            updated_at = excluded.updated_at
+    """, (
+        link["id"],
+        latitude,
+        longitude,
+        accuracy,
+        started
+    ))
 
-    con.commit()
-    con.close()
+    conn.commit()
+    conn.close()
 
-    # Այս բրաուզերն է live session-ի տերը
+    # Tie live tracking to this browser session.
     session["live_token"] = token
-    session["live_started_at"] = iso(started)
+    session["live_started_at"] = started
 
-    return jsonify(
-        ok=True,
-        status="LIVE",
-        video=
-            "video_armenia.mp4"
-            if choice == "armenia"
-            else "video_yerevan.mp4"
-    )
+    if choice == "armenia":
+        video = "video_armenia.mp4"
+    else:
+        video = "video_yerevan.mp4"
 
+    return jsonify({
+        "success": True,
+        "status": "LIVE",
+        "choice": choice,
+        "video": video,
+        "live_minutes": LIVE_MINUTES,
+        "message": "Location sharing is active for up to 30 minutes."
+    })
+
+
+# =========================
+# LIVE LOCATION
+# =========================
 
 @app.post("/api/r/<token>/location")
 def live_location(token):
 
-    # Միայն սկզբնական համաձայնություն տված browser-ը
+    refresh_expired()
+
+    # Only the browser session that accepted the request
+    # can continue sending live coordinates.
     if session.get("live_token") != token:
+        return jsonify({
+            "success": False,
+            "error": "Live location session not found"
+        }), 403
 
-        return jsonify(
-            error="Live location session not authorized."
-        ), 403
+    conn = db()
 
-    con = db()
+    link = conn.execute("""
+        SELECT *
+        FROM links
+        WHERE token = ?
+    """, (token,)).fetchone()
 
-    row = con.execute(
-        "SELECT * FROM links WHERE token=?",
-        (token,)
-    ).fetchone()
+    if not link:
+        conn.close()
 
-    if not row:
+        return jsonify({
+            "success": False,
+            "error": "Link not found"
+        }), 404
 
-        con.close()
+    # Original link expiration has priority.
+    expires = parse_time(link["expires_at"])
 
-        return jsonify(
-            error="Invalid link"
-        ), 404
+    if expires and expires <= now_utc():
 
-    if row["status"] != "LIVE":
-
-        con.close()
-
-        return jsonify(
-            error="Live session is no longer active."
-        ), 410
-
-    started = datetime.fromisoformat(
-        row["used_at"]
-    )
-
-    current = now()
-
-    # Live location-ի առավելագույն ժամանակը՝ 30 րոպե
-    if current >= started + timedelta(minutes=30):
-
-        con.execute(
-            """
+        conn.execute("""
             UPDATE links
-            SET status='LOCATION_RECEIVED'
-            WHERE id=? AND status='LIVE'
-            """,
-            (row["id"],)
-        )
+            SET status = 'EXPIRED'
+            WHERE id = ?
+        """, (link["id"],))
 
-        con.commit()
-        con.close()
+        conn.commit()
+        conn.close()
 
         session.pop("live_token", None)
         session.pop("live_started_at", None)
 
-        return jsonify(
-            error="Live location session finished."
-        ), 410
+        return jsonify({
+            "success": False,
+            "error": "Link expired"
+        }), 410
 
-    lat = data = request.get_json(silent=True) or {}
+    if link["status"] != "LIVE":
+        conn.close()
 
-    latitude = data.get("latitude")
-    longitude = data.get("longitude")
-    accuracy = data.get("accuracy")
+        session.pop("live_token", None)
+        session.pop("live_started_at", None)
 
-    if not isinstance(latitude, (int, float)) or \
-       not isinstance(longitude, (int, float)):
+        return jsonify({
+            "success": False,
+            "error": "Live sharing is no longer active"
+        }), 410
 
-        con.close()
+    # Maximum live sharing = 30 minutes.
+    if link["used_at"]:
 
-        return jsonify(
-            error="Invalid location."
-        ), 422
+        started = parse_time(link["used_at"])
 
-    if not (-90 <= latitude <= 90 and
-            -180 <= longitude <= 180):
+        if started and started + timedelta(minutes=LIVE_MINUTES) <= now_utc():
 
-        con.close()
+            conn.execute("""
+                UPDATE links
+                SET status = 'LOCATION_RECEIVED'
+                WHERE id = ?
+            """, (link["id"],))
 
-        return jsonify(
-            error="Invalid coordinates."
-        ), 400
+            conn.commit()
+            conn.close()
 
-    received = now()
+            session.pop("live_token", None)
+            session.pop("live_started_at", None)
 
-    # Պահում ենք վերջին դիրքը
-    con.execute(
-        """
-        UPDATE location_shares
-        SET latitude=?,
-            longitude=?,
-            accuracy=?,
-            location_timestamp=?,
-            received_at=?
-        WHERE link_id=?
-        """,
-        (
-            latitude,
-            longitude,
-            accuracy if isinstance(accuracy, (int, float)) else None,
-            data.get("location_timestamp") or iso(received),
-            iso(received),
-            row["id"]
-        )
-    )
+            return jsonify({
+                "success": False,
+                "error": "30 minute live sharing period ended"
+            }), 410
 
-    con.commit()
-    con.close()
-
-    return jsonify(
-        ok=True,
-        status="LIVE"
-    )
-@admin_required
-def stats():
-    refresh_expired()
-    con = db()
-    out = {}
-    out["active"] = con.execute("SELECT COUNT(*) FROM links WHERE status='ACTIVE'").fetchone()[0]
-    out["received"] = con.execute("SELECT COUNT(*) FROM links WHERE status='LOCATION_RECEIVED'").fetchone()[0]
-    out["declined"] = con.execute("SELECT COUNT(*) FROM links WHERE status='DECLINED'").fetchone()[0]
-    out["expired"] = con.execute("SELECT COUNT(*) FROM links WHERE status='EXPIRED'").fetchone()[0]
-    out["failed"] = con.execute("SELECT COUNT(*) FROM links WHERE status='LOCATION_FAILED'").fetchone()[0]
-    con.close()
-    return jsonify(out)
-
-@app.route("/r/<token>", methods=["GET"])
-def recipient(token):
-    refresh_expired()
-    con = db()
-    row = con.execute("SELECT * FROM links WHERE token=?", (token,)).fetchone()
-    con.close()
-    if not row:
-        return render_template("expired.html", title="LINK NOT FOUND", message="This exploration link is not valid."), 404
-    if row["status"] == "EXPIRED":
-        return render_template("expired.html", title="LINK EXPIRED", message="This exploration link is no longer active."), 410
-    if row["status"] != "ACTIVE":
-        return render_template("expired.html", title="LINK ALREADY USED", message="This link has already been completed."), 410
-    return render_template("recipient.html", token=token, expires_at=row["expires_at"])
-
-@app.post("/api/r/<token>/respond")
-def respond(token):
     data = request.get_json(silent=True) or {}
-    choice = data.get("choice")
-    if choice not in ("armenia","yerevan","declined"):
-        return jsonify(error="Invalid choice"), 400
-    con = db()
-    row = con.execute("SELECT * FROM links WHERE token=?", (token,)).fetchone()
-    if not row:
-        con.close(); return jsonify(error="Invalid link"), 404
-    if row["status"] != "ACTIVE" or datetime.fromisoformat(row["expires_at"]) <= now():
-        con.close(); return jsonify(error="Link expired or already used"), 410
 
-    if choice == "declined":
-        con.execute("UPDATE links SET status='DECLINED', selected_option=?, used_at=? WHERE id=? AND status='ACTIVE'",
-                    (choice, iso(now()), row["id"]))
-        con.commit(); con.close()
-        return jsonify(ok=True, status="DECLINED", video=None)
+    try:
+        latitude = float(data.get("latitude"))
+        longitude = float(data.get("longitude"))
 
-    lat = data.get("latitude"); lon = data.get("longitude"); acc = data.get("accuracy")
-    if not isinstance(lat,(int,float)) or not isinstance(lon,(int,float)):
-        con.execute("UPDATE links SET status='LOCATION_FAILED', selected_option=?, used_at=? WHERE id=? AND status='ACTIVE'",
-                    (choice, choice, iso(now()), row["id"]))
-        con.commit(); con.close()
-        return jsonify(error="A real location was not received."), 422
-    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
-        con.close(); return jsonify(error="Invalid coordinates"), 400
+        accuracy_value = data.get("accuracy")
+        accuracy = float(accuracy_value) if accuracy_value is not None else None
 
-    received = now()
-    cur = con.execute("UPDATE links SET status='LOCATION_RECEIVED', selected_option=?, used_at=? WHERE id=? AND status='ACTIVE'",
-                      (choice, iso(received), row["id"]))
-    if cur.rowcount != 1:
-        con.rollback(); con.close(); return jsonify(error="Link already completed"), 409
-    con.execute("""INSERT INTO location_shares(link_id,latitude,longitude,accuracy,location_timestamp,received_at)
-                   VALUES(?,?,?,?,?,?)""",
-                (row["id"], lat, lon, acc if isinstance(acc,(int,float)) else None,
-                 data.get("location_timestamp") or iso(received), iso(received)))
-    con.commit(); con.close()
-    return jsonify(ok=True, status="LOCATION_RECEIVED",
-                   video="video_armenia.mp4" if choice=="armenia" else "video_yerevan.mp4")
+    except (TypeError, ValueError):
+
+        conn.close()
+
+        return jsonify({
+            "success": False,
+            "error": "Invalid location data"
+        }), 400
+
+    if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+
+        conn.close()
+
+        return jsonify({
+            "success": False,
+            "error": "Invalid coordinates"
+        }), 400
+
+    updated = now_iso()
+
+    conn.execute("""
+        UPDATE location_shares
+        SET
+            latitude = ?,
+            longitude = ?,
+            accuracy = ?,
+            updated_at = ?
+        WHERE link_id = ?
+    """, (
+        latitude,
+        longitude,
+        accuracy,
+        updated,
+        link["id"]
+    ))
+
+    conn.commit()
+    conn.close()
+
+    return jsonify({
+        "success": True,
+        "status": "LIVE",
+        "updated_at": updated
+    })
+
+
+# =========================
+# HEALTH CHECK
+# =========================
 
 @app.get("/api/healthz")
 def healthz():
-    return jsonify(ok=True)
+    return jsonify({
+        "status": "ok"
+    })
 
-init_db()
+
+# =========================
+# RUN LOCAL
+# =========================
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT","5000")), debug=False)
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 5000)),
+        debug=False
+    )
