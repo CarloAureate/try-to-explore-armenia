@@ -81,7 +81,10 @@ def login():
             return redirect(url_for("admin"))
         error = "Access denied. Check the admin credentials and try again."
     return render_template("login.html", error=error)
-
+@app.get("/admin")
+@admin_required
+def admin():
+    return render_template("admin.html")
 
 
     data = request.get_json(silent=True) or {}
