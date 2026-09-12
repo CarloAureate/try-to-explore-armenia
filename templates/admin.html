@@ -227,37 +227,7 @@ function drawMap(locations) {
     '</div>';
 }
 
-  const map = document.getElementById("map");
-
-  if (!locations.length) {
-    map.innerHTML =
-      '<div class="no-location">Waiting for a shared location…</div>';
-    return;
-  }
-
-  const last = locations[0];
-
-  const lat = Number(last.latitude);
-  const lon = Number(last.longitude);
-
-  const delta = 0.03;
-
-  const bbox =
-    (lon-delta) + "," +
-    (lat-delta) + "," +
-    (lon+delta) + "," +
-    (lat+delta);
-
-  const src =
-    "https://www.openstreetmap.org/export/embed.html" +
-    "?bbox=" + encodeURIComponent(bbox) +
-    "&layer=mapnik" +
-    "&marker=" + encodeURIComponent(lat + "," + lon);
-
-  map.innerHTML =
-    '<iframe src="' + src +
-    '" loading="lazy"></iframe>';
-}
+  
 
 function drawLinks(items) {
 
