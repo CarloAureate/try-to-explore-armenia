@@ -82,8 +82,7 @@ def login():
         error = "Access denied. Check the admin credentials and try again."
     return render_template("login.html", error=error)
 
-@app.post("/api/r/<token>/respond")
-def respond(token):
+
 
     data = request.get_json(silent=True) or {}
 
