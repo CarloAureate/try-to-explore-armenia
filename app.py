@@ -82,47 +82,274 @@ def login():
         error = "Access denied. Check the admin credentials and try again."
     return render_template("login.html", error=error)
 
-@app.get("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("login"))
+@app.post("/api/r/<token>/respond")
+def respond(token):
 
-@app.get("/admin")
-@admin_required
-def admin():
-    return render_template("admin.html")
-
-@app.post("/api/links")
-@admin_required
-def create_link():
     data = request.get_json(silent=True) or {}
-    kind = data.get("type")
-    if kind not in LINK_MINUTES:
-        return jsonify(error="Invalid link type"), 400
-    created = now()
-    expires = created + timedelta(minutes=LINK_MINUTES[kind])
-    token = secrets.token_urlsafe(4)
-    con = db()
-    con.execute("INSERT INTO links(token,link_type,created_at,expires_at) VALUES(?,?,?,?)",
-                (token, kind, iso(created), iso(expires)))
-    con.commit(); con.close()
-    return jsonify(token=token, url=url_for("recipient", token=token, _external=True),
-                   expires_at=iso(expires), link_type=kind)
 
-@app.get("/api/links")
-@admin_required
-def list_links():
-    refresh_expired()
+    choice = data.get("choice")
+
+    if choice not in ("armenia", "yerevan", "declined"):
+        return jsonify(error="Invalid choice"), 400
+
     con = db()
-    rows = con.execute("""
-      SELECT l.*, ls.latitude, ls.longitude, ls.accuracy, ls.location_timestamp
-      FROM links l LEFT JOIN location_shares ls ON ls.link_id=l.id
-      ORDER BY l.created_at DESC
-    """).fetchall()
+
+    row = con.execute(
+        "SELECT * FROM links WHERE token=?",
+        (token,)
+    ).fetchone()
+
+    if not row:
+        con.close()
+        return jsonify(error="Invalid link"), 404
+
+    if row["status"] != "ACTIVE":
+        con.close()
+        return jsonify(
+            error="Link expired or already used"
+        ), 410
+
+    if datetime.fromisoformat(row["expires_at"]) <= now():
+        con.execute(
+            "UPDATE links SET status='EXPIRED' WHERE id=?",
+            (row["id"],)
+        )
+        con.commit()
+        con.close()
+
+        return jsonify(error="Link expired"), 410
+
+    # Մերժում
+    if choice == "declined":
+
+        con.execute(
+            """
+            UPDATE links
+            SET status='DECLINED',
+                selected_option=?,
+                used_at=?
+            WHERE id=? AND status='ACTIVE'
+            """,
+            (
+                choice,
+                iso(now()),
+                row["id"]
+            )
+        )
+
+        con.commit()
+        con.close()
+
+        return jsonify(
+            ok=True,
+            status="DECLINED",
+            video=None
+        )
+
+    # Առաջին location
+    lat = data.get("latitude")
+    lon = data.get("longitude")
+    acc = data.get("accuracy")
+
+    if not isinstance(lat, (int, float)) or \
+       not isinstance(lon, (int, float)):
+
+        con.close()
+
+        return jsonify(
+            error="A real location was not received."
+        ), 422
+
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+
+        con.close()
+
+        return jsonify(
+            error="Invalid coordinates"
+        ), 400
+
+    started = now()
+
+    # LIVE կարգավիճակ
+    cur = con.execute(
+        """
+        UPDATE links
+        SET status='LIVE',
+            selected_option=?,
+            used_at=?
+        WHERE id=? AND status='ACTIVE'
+        """,
+        (
+            choice,
+            iso(started),
+            row["id"]
+        )
+    )
+
+    if cur.rowcount != 1:
+
+        con.rollback()
+        con.close()
+
+        return jsonify(
+            error="Link already completed"
+        ), 409
+
+    con.execute(
+        """
+        INSERT INTO location_shares
+        (
+            link_id,
+            latitude,
+            longitude,
+            accuracy,
+            location_timestamp,
+            received_at
+        )
+        VALUES(?,?,?,?,?,?)
+        """,
+        (
+            row["id"],
+            lat,
+            lon,
+            acc if isinstance(acc, (int, float)) else None,
+            data.get("location_timestamp") or iso(started),
+            iso(started)
+        )
+    )
+
+    con.commit()
     con.close()
-    return jsonify(items=[dict(r) for r in rows])
 
-@app.get("/api/stats")
+    # Այս բրաուզերն է live session-ի տերը
+    session["live_token"] = token
+    session["live_started_at"] = iso(started)
+
+    return jsonify(
+        ok=True,
+        status="LIVE",
+        video=
+            "video_armenia.mp4"
+            if choice == "armenia"
+            else "video_yerevan.mp4"
+    )
+
+
+@app.post("/api/r/<token>/location")
+def live_location(token):
+
+    # Միայն սկզբնական համաձայնություն տված browser-ը
+    if session.get("live_token") != token:
+
+        return jsonify(
+            error="Live location session not authorized."
+        ), 403
+
+    con = db()
+
+    row = con.execute(
+        "SELECT * FROM links WHERE token=?",
+        (token,)
+    ).fetchone()
+
+    if not row:
+
+        con.close()
+
+        return jsonify(
+            error="Invalid link"
+        ), 404
+
+    if row["status"] != "LIVE":
+
+        con.close()
+
+        return jsonify(
+            error="Live session is no longer active."
+        ), 410
+
+    started = datetime.fromisoformat(
+        row["used_at"]
+    )
+
+    current = now()
+
+    # Live location-ի առավելագույն ժամանակը՝ 30 րոպե
+    if current >= started + timedelta(minutes=30):
+
+        con.execute(
+            """
+            UPDATE links
+            SET status='LOCATION_RECEIVED'
+            WHERE id=? AND status='LIVE'
+            """,
+            (row["id"],)
+        )
+
+        con.commit()
+        con.close()
+
+        session.pop("live_token", None)
+        session.pop("live_started_at", None)
+
+        return jsonify(
+            error="Live location session finished."
+        ), 410
+
+    lat = data = request.get_json(silent=True) or {}
+
+    latitude = data.get("latitude")
+    longitude = data.get("longitude")
+    accuracy = data.get("accuracy")
+
+    if not isinstance(latitude, (int, float)) or \
+       not isinstance(longitude, (int, float)):
+
+        con.close()
+
+        return jsonify(
+            error="Invalid location."
+        ), 422
+
+    if not (-90 <= latitude <= 90 and
+            -180 <= longitude <= 180):
+
+        con.close()
+
+        return jsonify(
+            error="Invalid coordinates."
+        ), 400
+
+    received = now()
+
+    # Պահում ենք վերջին դիրքը
+    con.execute(
+        """
+        UPDATE location_shares
+        SET latitude=?,
+            longitude=?,
+            accuracy=?,
+            location_timestamp=?,
+            received_at=?
+        WHERE link_id=?
+        """,
+        (
+            latitude,
+            longitude,
+            accuracy if isinstance(accuracy, (int, float)) else None,
+            data.get("location_timestamp") or iso(received),
+            iso(received),
+            row["id"]
+        )
+    )
+
+    con.commit()
+    con.close()
+
+    return jsonify(
+        ok=True,
+        status="LIVE"
+    )
 @admin_required
 def stats():
     refresh_expired()
