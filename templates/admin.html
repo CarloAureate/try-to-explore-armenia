@@ -1,19 +1,272 @@
-<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>TRY TO EXPLORE ARMENIA</title><link rel="stylesheet" href="/static/style.css"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"></head><body>
-<header><div class="brand"><span class="target">●</span><div><b>TRY TO EXPLORE</b><small>ARMENIA</small></div></div><div class="live">● SYSTEM LIVE</div></header>
-<main class="shell"><div class="topline">SECURE ADMINISTRATION</div><h1>Location command center</h1><p class="lead">Issue a private link, then wait for an explicit response.</p>
-<div class="actions"><button onclick="makeLink('3m')">＋ GENERATE 3-MINUTE LINK</button><button class="darkbtn" onclick="makeLink('3h')">＋ GENERATE 3-HOUR LINK</button></div>
-<div id="notice"></div>
-<div class="stats"><div><span>ACTIVE LINKS</span><strong id="active">0</strong></div><div><span>LOCATION RECEIVED</span><strong id="received">0</strong></div><div><span>DECLINED</span><strong id="declined">0</strong></div><div><span>EXPIRED</span><strong id="expired">0</strong></div></div>
-<section class="panel"><div class="panelhead"><span>LIVE OVERVIEW</span><span id="pins">0 PINS</span></div><h2>Armenia signal map</h2><div id="map"></div></section>
-<section class="panel"><div class="panelhead"><span>RECENT LINKS</span><a href="/logout">LOG OUT</a></div><div id="links" class="links"></div></section>
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TRY TO EXPLORE ARMENIA — Admin</title>
+<link rel="stylesheet" href="/static/style.css">
+
+<style>
+.mapbox {
+  width:100%;
+  height:420px;
+  border-radius:14px;
+  overflow:hidden;
+  border:1px solid #273341;
+  background:#0b1118;
+}
+.mapbox iframe {
+  width:100%;
+  height:100%;
+  border:0;
+}
+.no-location {
+  height:100%;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  color:#8996a8;
+  text-align:center;
+}
+</style>
+</head>
+
+<body>
+
+<main class="shell">
+
+<header class="top">
+  <div>
+    <div class="brand">
+      <span class="target">●</span>
+      <div>
+        <b>TRY TO EXPLORE</b>
+        <small>ARMENIA</small>
+      </div>
+    </div>
+    <div class="eyebrow">SECURE ADMINISTRATION</div>
+    <h1>Location command center</h1>
+    <p class="muted">Issue a private link, then wait for an explicit response.</p>
+  </div>
+
+  <a href="/logout" class="button darkbtn">LOG OUT</a>
+</header>
+
+<section class="card">
+  <button class="red" onclick="generate('3m')">
+    ＋ GENERATE 3-MINUTE LINK
+  </button>
+
+  <button class="yellow" onclick="generate('3h')" style="margin-left:8px">
+    ＋ GENERATE 3-HOUR LINK
+  </button>
+
+  <div id="generated" style="display:none;margin-top:18px">
+    <div class="eyebrow">SECURE LINK GENERATED</div>
+    <div id="expires" class="muted"></div>
+
+    <div class="linkbox" style="margin-top:10px">
+      <input id="newlink" readonly>
+      <button class="darkbtn" onclick="copyLink()">COPY LINK</button>
+      <button class="darkbtn" onclick="shareLink()">SHARE</button>
+    </div>
+  </div>
+</section>
+
+<section class="stats">
+  <div class="card">
+    <div class="eyebrow">ACTIVE LINKS</div>
+    <strong id="active">0</strong>
+  </div>
+
+  <div class="card">
+    <div class="eyebrow">LOCATION RECEIVED</div>
+    <strong id="received">0</strong>
+  </div>
+
+  <div class="card">
+    <div class="eyebrow">DECLINED</div>
+    <strong id="declined">0</strong>
+  </div>
+
+  <div class="card">
+    <div class="eyebrow">EXPIRED</div>
+    <strong id="expired">0</strong>
+  </div>
+</section>
+
+<section class="card">
+  <h2>LIVE OVERVIEW</h2>
+  <div id="pins" class="eyebrow">0 PINS</div>
+
+  <div class="mapbox" id="map">
+    <div class="no-location">Waiting for a shared location…</div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>RECENT LINKS</h2>
+
+  <div id="links"></div>
+</section>
+
 </main>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script>
-const map=L.map('map').setView([40.18,44.51],7); L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap'}).addTo(map);
-let markers=[];
-function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
-async function makeLink(type){const r=await fetch('/api/links',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type})});const d=await r.json();if(!r.ok){alert(d.error||'Error');return;}document.getElementById('notice').innerHTML=`<div class="success">SECURE LINK GENERATED<br><small>Expires: ${new Date(d.expires_at).toLocaleString()}</small><div class="shareline"><input id="newlink" readonly value="${esc(d.url)}"><button onclick="copyLink()">COPY LINK</button><button onclick="shareLink()">SHARE</button></div></div>`;load();}
-async function copyLink(){const x=document.getElementById('newlink');try{await navigator.clipboard.writeText(x.value);alert('Copied');}catch(e){x.select();document.execCommand('copy');alert('Copied or selected for copy');}}
-async function shareLink(){const v=document.getElementById('newlink').value;if(navigator.share){try{await navigator.share({title:'TRY TO EXPLORE ARMENIA',url:v})}catch(e){}}else copyLink();}
-async function load(){const [s,l]=await Promise.all([fetch('/api/stats').then(r=>r.json()),fetch('/api/links').then(r=>r.json())]);for(const k of ['active','received','declined','expired'])document.getElementById(k).textContent=s[k];document.getElementById('links').innerHTML=l.items.map(x=>`<div class="linkrow"><b>${x.link_type==='3m'?'3 MIN':'3 HOURS'}</b><span>${esc(x.status)}</span><small>${esc(x.selected_option||'—')} · ${x.created_at?new Date(x.created_at).toLocaleString():''}</small></div>`).join('')||'<div class="muted">NO LINKS YET</div>';markers.forEach(m=>map.removeLayer(m));markers=[];let count=0;l.items.forEach(x=>{if(x.latitude!=null&&x.longitude!=null){const m=L.marker([x.latitude,x.longitude]).addTo(map).bindPopup(`<b>${esc(x.selected_option)}</b><br>Accuracy: ${esc(x.accuracy)} m<br>${esc(x.location_timestamp)}`);markers.push(m);count++;}});document.getElementById('pins').textContent=count+' PINS';}
-load();setInterval(load,5000);
-</script></body></html>
+
+<script>
+
+let latestLocations = [];
+
+async function generate(type) {
+  try {
+    const r = await fetch("/api/links", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({type:type})
+    });
+
+    const data = await r.json();
+
+    if (!r.ok) {
+      alert(data.error || "Could not generate link");
+      return;
+    }
+
+    document.getElementById("generated").style.display = "block";
+    document.getElementById("newlink").value = data.url;
+
+    const expires = new Date(data.expires_at);
+
+    document.getElementById("expires").textContent =
+      "Expires: " + expires.toLocaleString();
+
+  } catch(e) {
+    alert("Connection error");
+  }
+}
+
+async function loadData() {
+  try {
+    const stats = await fetch("/api/stats").then(r => r.json());
+    const data = await fetch("/api/links").then(r => r.json());
+
+    document.getElementById("active").textContent = stats.active || 0;
+    document.getElementById("received").textContent = stats.received || 0;
+    document.getElementById("declined").textContent = stats.declined || 0;
+    document.getElementById("expired").textContent = stats.expired || 0;
+
+    const items = data.items || [];
+
+    latestLocations = items.filter(x =>
+      x.latitude !== null &&
+      x.longitude !== null
+    );
+
+    document.getElementById("pins").textContent =
+      latestLocations.length + " PINS";
+
+    drawMap(latestLocations);
+    drawLinks(items);
+
+  } catch(e) {
+    console.log(e);
+  }
+}
+
+function drawMap(locations) {
+
+  const map = document.getElementById("map");
+
+  if (!locations.length) {
+    map.innerHTML =
+      '<div class="no-location">Waiting for a shared location…</div>';
+    return;
+  }
+
+  const last = locations[0];
+
+  const lat = Number(last.latitude);
+  const lon = Number(last.longitude);
+
+  const delta = 0.03;
+
+  const bbox =
+    (lon-delta) + "," +
+    (lat-delta) + "," +
+    (lon+delta) + "," +
+    (lat+delta);
+
+  const src =
+    "https://www.openstreetmap.org/export/embed.html" +
+    "?bbox=" + encodeURIComponent(bbox) +
+    "&layer=mapnik" +
+    "&marker=" + encodeURIComponent(lat + "," + lon);
+
+  map.innerHTML =
+    '<iframe src="' + src +
+    '" loading="lazy"></iframe>';
+}
+
+function drawLinks(items) {
+
+  const box = document.getElementById("links");
+
+  if (!items.length) {
+    box.innerHTML =
+      '<p class="muted">No links yet.</p>';
+    return;
+  }
+
+  box.innerHTML = items.map(x => {
+
+    let location = "—";
+
+    if (x.latitude !== null && x.longitude !== null) {
+      location =
+        Number(x.latitude).toFixed(5) +
+        ", " +
+        Number(x.longitude).toFixed(5);
+    }
+
+    return `
+      <div class="card" style="margin-top:10px">
+        <b>${x.link_type || ""}</b>
+        <div class="muted">${x.status || ""}</div>
+        <div style="margin-top:6px">${location}</div>
+      </div>
+    `;
+
+  }).join("");
+}
+
+function copyLink() {
+
+  const input = document.getElementById("newlink");
+
+  navigator.clipboard.writeText(input.value);
+
+}
+
+function shareLink() {
+
+  const url = document.getElementById("newlink").value;
+
+  if (navigator.share) {
+    navigator.share({
+      title:"TRY TO EXPLORE ARMENIA",
+      text:"Explore Armenia",
+      url:url
+    });
+  } else {
+    copyLink();
+    alert("Link copied");
+  }
+}
+
+loadData();
+
+setInterval(loadData, 5000);
+
+</script>
+
+</body>
+</html>
