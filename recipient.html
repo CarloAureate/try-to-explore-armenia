@@ -1,0 +1,30 @@
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>TRY TO EXPLORE ARMENIA</title><link rel="stylesheet" href="/static/style.css"></head><body>
+<main class="shell recipient"><div class="brand"><span class="target">●</span><div><b>TRY TO EXPLORE</b><small>ARMENIA</small></div></div>
+<section class="hero"><div class="eyebrow">PRIVATE EXPLORATION REQUEST</div><h1>Where are we going?</h1><p>Choose an option. Your location will only be requested after you press one of the green or yellow buttons.</p>
+<div id="msg" class="muted"></div>
+<button class="green choice" onclick="go('armenia')"><strong>EXPLORE ARMENIA</strong><small>Ամբողջ Հայաստան</small></button>
+<button class="yellow choice" onclick="go('yerevan')"><strong>EXPLORE YEREVAN</strong><small>Միայն Երևան</small></button>
+<button class="red choice" onclick="go('declined')"><strong>НИКУДА НЕ ИДЁМ</strong><small>Ոչ մի տեղ չենք գնում, ոչ մի բան չենք ուզում բացահայտենք։</small></button>
+</section>
+<section id="videoBox" class="videoBox" hidden><div class="eyebrow">EXPLORATION VIDEO</div><video id="video" playsinline controls preload="metadata"></video><button id="play" class="darkbtn">▶ PLAY VIDEO</button></section>
+</main>
+<script>
+const token={{token|tojson}};
+function msg(t,err=false){const x=document.getElementById('msg');x.textContent=t;x.className=err?'error':'muted';}
+async function go(choice){
+ document.querySelectorAll('.choice').forEach(b=>b.disabled=true);
+ if(choice==='declined'){const r=await fetch(`/api/r/${token}/respond`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({choice})});msg(r.ok?'Պարզ է։ Ոչ մի տեղ չենք գնում։':'Հղումը այլևս հասանելի չէ։');return;}
+ msg('Խնդրում ենք հաստատել տեղադրության թույլտվությունը…');
+ if(!navigator.geolocation){msg('Այս դիտարկիչը չի աջակցում տեղադրության որոշմանը։',true);document.querySelectorAll('.choice').forEach(b=>b.disabled=false);return;}
+ navigator.geolocation.getCurrentPosition(async p=>{
+   const payload={choice,latitude:p.coords.latitude,longitude:p.coords.longitude,accuracy:p.coords.accuracy,location_timestamp:new Date(p.timestamp||Date.now()).toISOString()};
+   const r=await fetch(`/api/r/${token}/respond`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+   const d=await r.json();
+   if(!r.ok){msg(d.error||'Տեղադրությունը չհաջողվեց փոխանցել։ Փորձեք կրկին։',true);document.querySelectorAll('.choice').forEach(b=>b.disabled=false);return;}
+   msg('Տեղադրությունը հաստատվեց։ Շնորհակալություն։');
+   const v=document.getElementById('video');v.src='/static/media/'+d.video;document.getElementById('videoBox').hidden=false;
+   try{await v.play();}catch(e){document.getElementById('play').hidden=false;}
+   document.getElementById('play').onclick=()=>v.play();
+ }, e=>{const m={1:'Տեղադրության թույլտվությունը մերժվել է։',2:'Տեղադրությունը հասանելի չէ։',3:'Տեղադրության հարցումը ժամանականց է։'}[e.code]||'Չհաջողվեց ստանալ տեղադրությունը։';msg(m,true);document.querySelectorAll('.choice').forEach(b=>b.disabled=false);},{enableHighAccuracy:true,timeout:15000,maximumAge:0});
+}
+</script></body></html>

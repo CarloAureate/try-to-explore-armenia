@@ -1,0 +1,19 @@
+<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>TRY TO EXPLORE ARMENIA</title><link rel="stylesheet" href="/static/style.css"><link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"></head><body>
+<header><div class="brand"><span class="target">●</span><div><b>TRY TO EXPLORE</b><small>ARMENIA</small></div></div><div class="live">● SYSTEM LIVE</div></header>
+<main class="shell"><div class="topline">SECURE ADMINISTRATION</div><h1>Location command center</h1><p class="lead">Issue a private link, then wait for an explicit response.</p>
+<div class="actions"><button onclick="makeLink('3m')">＋ GENERATE 3-MINUTE LINK</button><button class="darkbtn" onclick="makeLink('3h')">＋ GENERATE 3-HOUR LINK</button></div>
+<div id="notice"></div>
+<div class="stats"><div><span>ACTIVE LINKS</span><strong id="active">0</strong></div><div><span>LOCATION RECEIVED</span><strong id="received">0</strong></div><div><span>DECLINED</span><strong id="declined">0</strong></div><div><span>EXPIRED</span><strong id="expired">0</strong></div></div>
+<section class="panel"><div class="panelhead"><span>LIVE OVERVIEW</span><span id="pins">0 PINS</span></div><h2>Armenia signal map</h2><div id="map"></div></section>
+<section class="panel"><div class="panelhead"><span>RECENT LINKS</span><a href="/logout">LOG OUT</a></div><div id="links" class="links"></div></section>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script>
+const map=L.map('map').setView([40.18,44.51],7); L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© OpenStreetMap'}).addTo(map);
+let markers=[];
+function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+async function makeLink(type){const r=await fetch('/api/links',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({type})});const d=await r.json();if(!r.ok){alert(d.error||'Error');return;}document.getElementById('notice').innerHTML=`<div class="success">SECURE LINK GENERATED<br><small>Expires: ${new Date(d.expires_at).toLocaleString()}</small><div class="shareline"><input id="newlink" readonly value="${esc(d.url)}"><button onclick="copyLink()">COPY LINK</button><button onclick="shareLink()">SHARE</button></div></div>`;load();}
+async function copyLink(){const x=document.getElementById('newlink');try{await navigator.clipboard.writeText(x.value);alert('Copied');}catch(e){x.select();document.execCommand('copy');alert('Copied or selected for copy');}}
+async function shareLink(){const v=document.getElementById('newlink').value;if(navigator.share){try{await navigator.share({title:'TRY TO EXPLORE ARMENIA',url:v})}catch(e){}}else copyLink();}
+async function load(){const [s,l]=await Promise.all([fetch('/api/stats').then(r=>r.json()),fetch('/api/links').then(r=>r.json())]);for(const k of ['active','received','declined','expired'])document.getElementById(k).textContent=s[k];document.getElementById('links').innerHTML=l.items.map(x=>`<div class="linkrow"><b>${x.link_type==='3m'?'3 MIN':'3 HOURS'}</b><span>${esc(x.status)}</span><small>${esc(x.selected_option||'—')} · ${x.created_at?new Date(x.created_at).toLocaleString():''}</small></div>`).join('')||'<div class="muted">NO LINKS YET</div>';markers.forEach(m=>map.removeLayer(m));markers=[];let count=0;l.items.forEach(x=>{if(x.latitude!=null&&x.longitude!=null){const m=L.marker([x.latitude,x.longitude]).addTo(map).bindPopup(`<b>${esc(x.selected_option)}</b><br>Accuracy: ${esc(x.accuracy)} m<br>${esc(x.location_timestamp)}`);markers.push(m);count++;}});document.getElementById('pins').textContent=count+' PINS';}
+load();setInterval(load,5000);
+</script></body></html>
