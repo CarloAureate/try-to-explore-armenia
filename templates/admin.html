@@ -121,7 +121,7 @@ async function generate(type) {
     const r = await fetch("/api/links", {
       method:"POST",
       headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({type:type})
+      body:JSON.stringify({duration:type})
     });
 
     const data = await r.json();
