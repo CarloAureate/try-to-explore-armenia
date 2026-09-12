@@ -119,9 +119,14 @@ let latestLocations = [];
 async function generate(type) {
   try {
     const r = await fetch("/api/links", {
-      method:"POST",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({duration:type})
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      credentials: "same-origin",
+      body: JSON.stringify({
+        duration: type
+      })
     });
 
     const data = await r.json();
@@ -139,7 +144,8 @@ async function generate(type) {
     document.getElementById("expires").textContent =
       "Expires: " + expires.toLocaleString();
 
-  } catch(e) {
+  } catch (e) {
+    console.error(e);
     alert("Connection error");
   }
 }
