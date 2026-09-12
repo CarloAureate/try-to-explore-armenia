@@ -101,7 +101,7 @@ def create_link():
         return jsonify(error="Invalid link type"), 400
     created = now()
     expires = created + timedelta(minutes=LINK_MINUTES[kind])
-    token = secrets.token_urlsafe(32)
+    token = secrets.token_urlsafe(4)
     con = db()
     con.execute("INSERT INTO links(token,link_type,created_at,expires_at) VALUES(?,?,?,?)",
                 (token, kind, iso(created), iso(expires)))
